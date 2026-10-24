@@ -76,6 +76,14 @@
             position: relative; background: var(--glass-bg); backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
             border-radius: var(--radius-lg); border: 1px solid var(--glass-border); box-shadow: var(--glass-shadow);
             overflow: hidden; display: flex; flex-direction: column; transition: all 0.5s ease;
+            z-index: 1;
+        }
+
+        button, .chat-item, .settings-item, .theme-option {
+            touch-action: manipulation;
+        }
+        button i, button span {
+            pointer-events: none;
         }
 
         ::-webkit-scrollbar { width: 4px; }
@@ -159,7 +167,7 @@
         .loading-text { color: var(--text-secondary); font-size: 14px; margin-top: 24px; }
         .shake { animation: shake 0.4s ease; }
 
-        #main-screen { display: none; flex-direction: column; flex: 1; overflow: hidden; position: relative; }
+        #main-screen { display: none; flex-direction: column; flex: 1; overflow: hidden; position: relative; z-index: 1; }
         #main-screen.active { display: flex; }
 
         .main-header { display: flex; justify-content: space-between; align-items: center; padding: 16px 20px; border-bottom: 1px solid var(--glass-border); flex-shrink: 0; min-height: 64px; gap: 10px; }
@@ -347,7 +355,7 @@
 
         @media (max-width: 480px) {
             body { padding: 0; align-items: stretch; }
-            #app { border-radius: 0; height: 100vh; max-height: 100vh; }
+            #app { border-radius: 0; height: 100vh; max-height: 100vh; height: 100dvh; max-height: 100dvh; }
             #chat-screen, #settings-screen { border-radius: 0; }
             #auth-screen, #recovery-screen { padding: 30px 20px; }
             .theme-palette { grid-template-columns: repeat(3, 1fr); }
@@ -355,6 +363,14 @@
             .main-header .title { font-size: 18px; }
             .main-header .actions button { padding: 6px 8px; font-size: 16px; }
             .main-header .avatar { width: 32px; height: 32px; font-size: 14px; }
+        }
+
+        @media (hover: none) and (pointer: coarse) {
+            .btn-send:hover, .btn-mic:hover, .btn-attach:hover, 
+            .btn-primary:hover, .btn-secondary:hover,
+            .chat-item:hover, .theme-option:hover, .settings-item:hover {
+                transform: none !important;
+            }
         }
     </style>
 </head>
@@ -577,7 +593,6 @@
         </div>
     </div>
 
-    <!-- Модалка нового чата -->
     <div class="modal-overlay" id="new-chat-modal">
         <div class="modal-content">
             <h3>🟣 Новый чат</h3>
@@ -596,7 +611,6 @@
         </div>
     </div>
 
-    <!-- Модалка пересылки -->
     <div class="modal-overlay" id="forward-modal">
         <div class="modal-content">
             <h3>📤 Переслать</h3>
@@ -606,7 +620,6 @@
         </div>
     </div>
 
-    <!-- Универсальная модалка подтверждения -->
     <div class="modal-overlay" id="confirm-modal">
         <div class="modal-content">
             <h3 id="confirm-title">Вы уверены?</h3>
@@ -618,7 +631,6 @@
         </div>
     </div>
 
-    <!-- Универсальная модалка ввода (prompt) -->
     <div class="modal-overlay" id="prompt-modal">
         <div class="modal-content">
             <h3 id="prompt-title">Введите текст</h3>
@@ -673,9 +685,6 @@ function debounce(fn, ms) { let t = null; return (...args) => { clearTimeout(t);
 function uid() { return crypto.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function hashCode(str) { let hash = 0; for (let i = 0; i < str.length; i++) { hash = ((hash << 5) - hash) + str.charCodeAt(i); hash |= 0; } return hash; }
 
-// ============================================================
-// СИСТЕМНЫЕ МОДАЛКИ (замена confirm и prompt) - п.1
-// ============================================================
 const confirmModal = $('confirm-modal');
 const promptModal = $('prompt-modal');
 
@@ -706,21 +715,22 @@ function showPrompt(title, defaultValue = '') {
         promptModal.classList.add('active');
         setTimeout(() => $('prompt-input').focus(), 100);
 
+        const onKey = (e) => { if (e.key === 'Enter') onOk(); };
         const cleanup = () => {
             promptModal.classList.remove('active');
             $('prompt-ok-btn').removeEventListener('click', onOk);
             $('prompt-cancel-btn').removeEventListener('click', onCancel);
+            $('prompt-input').removeEventListener('keydown', onKey);
         };
         const onOk = () => { const val = $('prompt-input').value; cleanup(); resolve(val); };
         const onCancel = () => { cleanup(); resolve(null); };
 
         $('prompt-ok-btn').addEventListener('click', onOk);
         $('prompt-cancel-btn').addEventListener('click', onCancel);
-        $('prompt-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') onOk(); }, { once: true });
+        $('prompt-input').addEventListener('keydown', onKey);
     });
 }
 
-// ============================================================
 const toastEl = $('toast'); let toastTimer = null;
 function showToast(message, type = 'info') {
     if (!message) return; toastEl.textContent = String(message); toastEl.className = 'toast';
@@ -975,10 +985,24 @@ async function openChat(chatId) {
     try { state.messages.set(chatId, await messagesService.getMessages(chatId) || []); } catch (e) { state.messages.set(chatId, []); }
     renderMessages(chatId);
     try {
-        const channel = messagesService.subscribe(chatId, (msg) => { if (!msg) return; const list = state.messages.get(chatId) || []; if (!list.some(m => m.id === msg.id)) { list.push(msg); state.messages.set(chatId, list); } if (state.currentChatId === chatId) renderMessages(chatId); renderChats(); if (msg.sender !== state.user?.username) notifyNewMessage(msg.sender || 'Собеседник', msg.text || 'Новое сообщение', chatId); });
+        const channel = messagesService.subscribe(chatId, (msg) => {
+            if (!msg) return;
+            if (msg.type === 'DELETE') {
+                state.messages.set(chatId, (state.messages.get(chatId) || []).filter(m => m.id !== msg.id));
+                if (state.currentChatId === chatId) renderMessages(chatId);
+                renderChats();
+                return;
+            }
+            const list = state.messages.get(chatId) || [];
+            if (!list.some(m => m.id === msg.id)) { list.push(msg); state.messages.set(chatId, list); }
+            if (state.currentChatId === chatId) renderMessages(chatId);
+            renderChats();
+            if (msg.sender !== state.user?.username) notifyNewMessage(msg.sender || 'Собеседник', msg.text || 'Новое сообщение', chatId);
+        });
         state.subscriptions.messages = channel;
     } catch (e) { console.warn('Sub failed', e); }
-    messageInput.disabled = false; sendBtn.disabled = false; micBtn.disabled = false; attachBtn.disabled = false; setTimeout(() => messageInput.focus(), 100);
+    messageInput.disabled = false; sendBtn.disabled = false; micBtn.disabled = false; attachBtn.disabled = false; 
+    if (window.innerWidth > 480) setTimeout(() => messageInput.focus(), 100);
     clearReply();
 }
 function unsubscribeFromMessages() { if (state.subscriptions.messages) { try { supabase.removeChannel(state.subscriptions.messages); } catch {} state.subscriptions.messages = null; } }
@@ -1159,7 +1183,6 @@ async function sendMessage() {
         showToast('Ошибка отправки', 'error'); 
     }
     finally { 
-        // Исправление: если чат закрыт, кнопка должна остаться disabled (п.10)
         if (state.currentChatId === currentId) sendBtn.disabled = false;
     }
 }
@@ -1170,6 +1193,24 @@ $('chat-back').addEventListener('click', closeChat);
 $('settings-btn').addEventListener('click', () => settingsScreen.classList.add('active'));
 $('settings-back').addEventListener('click', () => settingsScreen.classList.remove('active'));
 headerAvatar.addEventListener('click', () => settingsScreen.classList.add('active'));
+
+history.pushState({ screen: 'main' }, '', location.href);
+window.addEventListener('popstate', () => {
+    if (state.currentChatId) {
+        closeChat();
+        history.pushState({ screen: 'main' }, '', location.href);
+    } else if (settingsScreen.classList.contains('active')) {
+        settingsScreen.classList.remove('active');
+        history.pushState({ screen: 'main' }, '', location.href);
+    }
+});
+
+window.addEventListener('pageshow', (e) => {
+    if (!e.persisted || !state.user) return;
+    listenUsers();
+    subscribeToChats();
+    if (state.currentChatId) openChat(state.currentChatId);
+});
 
 const callOverlay = $('call-overlay'), callName = $('call-name'), callStatus = $('call-status'), callAvatar = $('call-avatar');
 const callBtn = $('call-btn'), callEndBtn = $('call-end-btn'), callMuteBtn = $('call-mute-btn');
