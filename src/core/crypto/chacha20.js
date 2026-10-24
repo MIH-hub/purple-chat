@@ -80,13 +80,30 @@ export async function decryptMessage(ciphertext, key, nonce) {
   }
 }
 
+// Безопасная сериализация (без переполнения стека)
 export function serializeCiphertext(ciphertext) {
-  return btoa(String.fromCharCode(...ciphertext));
+  if (!ciphertext) return '';
+  const bytes = new Uint8Array(ciphertext);
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
+// Безопасная десериализация
 export function deserializeCiphertext(serialized) {
-  const binary = atob(serialized);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes;
+  if (!serialized) return new Uint8Array(0);
+  try {
+    const binary = atob(serialized);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch (e) {
+    console.error('Ошибка десериализации:', e);
+    return new Uint8Array(0);
+  }
 }

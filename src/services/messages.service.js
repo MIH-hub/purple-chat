@@ -1,26 +1,13 @@
 // services/messages.service.js
 import { supabase } from '../core/supabase/client.js';
 import { localDB } from '../core/db/local.js';
-import {
-    encryptMessage, decryptMessage,
-    serializeCiphertext, deserializeCiphertext
-} from '../core/crypto/chacha20.js';
-import {
-    hybridKeyExchange, kyberDecapsulate,
-    deserializePublicKey
-} from '../core/crypto/kyber.js';
+import { encryptMessage, decryptMessage, serializeCiphertext, deserializeCiphertext } from '../core/crypto/chacha20.js';
+import { hybridKeyExchange, kyberDecapsulate, deserializePublicKey } from '../core/crypto/kyber.js';
 import { signaling } from '../core/trystero-client.js';
 
 export class MessagesService {
-    constructor() {
-        this.currentUser = null;
-        this.sessionKeys = {};
-        this.subscriptions = [];
-    }
-
-    setUser(user) {
-        this.currentUser = user;
-    }
+    constructor() { this.currentUser = null; this.sessionKeys = {}; this.subscriptions = []; }
+    setUser(user) { this.currentUser = user; }
 
     async setupSessionKeyAsSender(chatId, remotePublicKey) {
         const { sharedSecret, ciphertext } = hybridKeyExchange(remotePublicKey);
@@ -32,7 +19,8 @@ export class MessagesService {
     async setupSessionKeyAsReceiver(chatId, ciphertext) {
         const localUser = await localDB.getUser(this.currentUser.username);
         if (!localUser || !localUser.privateKeyKyber) throw new Error('Нет ключа ML-KEM');
-        const sharedSecret = kyberDecapsulate(ciphertext, localUser.privateKeyKyber);
+        const privKey = localUser.privateKeyKyber instanceof Uint8Array ? localUser.privateKeyKyber : new Uint8Array(localUser.privateKeyKyber);
+        const sharedSecret = kyberDecapsulate(ciphertext, privKey);
         this.sessionKeys[chatId] = sharedSecret;
         await localDB.saveKey({ id: `${chatId}_session`, chatId, keyType: 'session', keyData: Array.from(sharedSecret) });
         return sharedSecret;
@@ -45,11 +33,9 @@ export class MessagesService {
         return null;
     }
 
-    // Хелпер для гарантированного получения ключа
     async _ensureKey(chatId) {
         let key = await this.getSessionKey(chatId);
         if (key) return { key, kyberCiphertext: null };
-
         const chat = await localDB.getChat(chatId);
         if (!chat) throw new Error('Чат не найден');
 
@@ -68,113 +54,97 @@ export class MessagesService {
         }
     }
 
-    async send(chatId, text) {
+    async send(chatId, text, replyTo = null) {
         if (!this.currentUser) throw new Error('Не авторизован');
-        try {
-            const { key, kyberCiphertext } = await this._ensureKey(chatId);
-            const messageData = JSON.stringify({ text, timestamp: Date.now() });
-            const { ciphertext, nonce } = await encryptMessage(new TextEncoder().encode(messageData), key);
-
-            const { data, error } = await supabase.from('messages').insert({
-                chat_id: chatId, sender: this.currentUser.username,
-                ciphertext: serializeCiphertext(ciphertext), nonce: serializeCiphertext(nonce),
-                kyber_ciphertext: kyberCiphertext ? serializeCiphertext(kyberCiphertext) : null,
-                created_at: new Date().toISOString()
-            }).select();
-            if (error) throw error;
-
-            const msg = data[0];
-            await localDB.saveMessage({ id: msg.id, chatId, sender: msg.sender, text, timestamp: Date.parse(msg.created_at), encrypted: true });
-            return msg;
-        } catch (e) {
-            console.error('Ошибка отправки:', e);
-            throw e;
-        }
-    }
-
-    async sendVoiceHybrid(chatId, audioBlob, duration) {
-        if (!this.currentUser) throw new Error('Не авторизован');
-        const chat = await localDB.getChat(chatId);
-        const onlinePeers = signaling.getPeers(chatId);
-        const otherMembers = chat.members.filter(m => m !== this.currentUser.username);
-        const isEveryoneOnline = otherMembers.every(m => onlinePeers.includes(m));
-
-        if (isEveryoneOnline && otherMembers.length > 0 && !chat.is_saved) {
-            return await this.sendVoiceP2P(chatId, audioBlob, duration);
-        }
-        return await this.sendVoiceCloud(chatId, audioBlob, duration);
-    }
-
-    async sendVoiceP2P(chatId, audioBlob, duration) {
-        const { key } = await this._ensureKey(chatId);
-        const buffer = await audioBlob.arrayBuffer();
-        const { ciphertext, nonce } = await encryptMessage(new Uint8Array(buffer), key);
-        
-        const payload = {
-            id: `voice_${Date.now()}`, chatId, sender: this.currentUser.username,
-            type: 'voice', ciphertext: serializeCiphertext(ciphertext), nonce: serializeCiphertext(nonce),
-            duration: Math.round(duration), mimeType: audioBlob.type, timestamp: Date.now()
-        };
-
-        const sent = signaling.sendMessage(chatId, { type: 'voice-message', payload });
-        if (!sent) throw new Error('P2P не удался');
-
-        await localDB.saveMessage({ ...payload, voiceData: Array.from(new Uint8Array(buffer)), voiceMime: audioBlob.type, voiceDuration: duration });
-        return payload;
-    }
-
-    async sendVoiceCloud(chatId, audioBlob, duration) {
-        const { key } = await this._ensureKey(chatId);
-        const buffer = await audioBlob.arrayBuffer();
-        const { ciphertext, nonce } = await encryptMessage(new Uint8Array(buffer), key);
-
-        const storagePath = `voices/${chatId}/${Date.now()}.enc`;
-        const { error: uploadError } = await supabase.storage.from('media').upload(storagePath, ciphertext);
-        if (uploadError) throw uploadError;
-
-        const { data: urlData } = supabase.storage.from('media').getPublicUrl(storagePath);
-        
-        const metaData = JSON.stringify({ type: 'voice', url: urlData.publicUrl, nonce: serializeCiphertext(nonce), duration: Math.round(duration) });
-        const { ciphertext: metaCipher, nonce: metaNonce } = await encryptMessage(new TextEncoder().encode(metaData), key);
+        const { key, kyberCiphertext } = await this._ensureKey(chatId);
+        const messageData = JSON.stringify({ text, replyTo: replyTo ? { id: replyTo.id, text: replyTo.text } : null, timestamp: Date.now() });
+        const { ciphertext, nonce } = await encryptMessage(new TextEncoder().encode(messageData), key);
 
         const { data, error } = await supabase.from('messages').insert({
             chat_id: chatId, sender: this.currentUser.username,
-            ciphertext: serializeCiphertext(metaCipher), nonce: serializeCiphertext(metaNonce),
+            ciphertext: serializeCiphertext(ciphertext), nonce: serializeCiphertext(nonce),
+            kyber_ciphertext: kyberCiphertext ? serializeCiphertext(kyberCiphertext) : null,
             created_at: new Date().toISOString()
         }).select();
         if (error) throw error;
 
         const msg = data[0];
-        const resultMsg = {
-            id: msg.id, chatId, sender: this.currentUser.username, type: 'voice',
-            voiceUrl: urlData.publicUrl, voiceNonce: serializeCiphertext(nonce), voiceDuration: duration,
-            localBlob: audioBlob, timestamp: Date.parse(msg.created_at), encrypted: true
-        };
-        await localDB.saveMessage({ ...resultMsg, voiceData: Array.from(new Uint8Array(buffer)) });
-        return resultMsg;
+        await localDB.saveMessage({ id: msg.id, chatId, sender: msg.sender, text, replyTo, timestamp: Date.now(), encrypted: true });
+        return { id: msg.id, chatId, sender: msg.sender, text, replyTo, timestamp: Date.now(), encrypted: true };
     }
 
-    async downloadVoice(msg) {
-        if (msg.localBlob) return msg.localBlob;
-        if (msg.voiceData) return new Blob([new Uint8Array(msg.voiceData)], { type: 'audio/webm' });
-        if (!msg.voiceUrl || !msg.voiceNonce) throw new Error('Нет данных');
+    async sendMedia(chatId, fileBlob, type = 'file', fileName = 'file', duration = 0) {
+        if (!this.currentUser) throw new Error('Не авторизован');
+        try {
+            const { key, kyberCiphertext } = await this._ensureKey(chatId); 
+            const buffer = await fileBlob.arrayBuffer();
+            const { ciphertext, nonce } = await encryptMessage(new Uint8Array(buffer), key);
 
+            const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+            const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+            const storagePath = `${chatId}/${crypto.randomUUID()}.enc`;
+            const uploadUrl = `${supabaseUrl}/storage/v1/object/media/${storagePath}`;
+
+            const encryptedBlob = new Blob([ciphertext], { type: 'application/octet-stream' });
+            const res = await fetch(uploadUrl, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${supabaseKey}`, 'apikey': supabaseKey, 'x-upsert': 'true' },
+                body: encryptedBlob
+            });
+
+            if (!res.ok) throw new Error('Ошибка загрузки в Storage: ' + await res.text());
+            const publicUrl = `${supabaseUrl}/storage/v1/object/public/media/${storagePath}`;
+
+            const metaData = JSON.stringify({ type, fileName, mimeType: fileBlob.type, url: publicUrl, nonce: serializeCiphertext(nonce), duration });
+            const { ciphertext: metaCipher, nonce: metaNonce } = await encryptMessage(new TextEncoder().encode(metaData), key);
+
+            const { data, error } = await supabase.from('messages').insert({
+                chat_id: chatId, sender: this.currentUser.username,
+                ciphertext: serializeCiphertext(metaCipher), nonce: serializeCiphertext(metaNonce),
+                kyber_ciphertext: kyberCiphertext ? serializeCiphertext(kyberCiphertext) : null, 
+                created_at: new Date().toISOString()
+            }).select();
+            if (error) throw error;
+
+            const msg = data[0];
+            const resultMsg = {
+                id: msg.id, chatId, sender: this.currentUser.username, type: type,
+                mediaType: type, text: type === 'voice' ? `🎤 Голосовое (${duration} сек)` : (type === 'image' ? '🖼️ Фото' : `📎 ${fileName}`),
+                fileName: fileName, mimeType: fileBlob.type,
+                voiceUrl: type === 'voice' ? publicUrl : null,
+                mediaUrl: type !== 'voice' ? publicUrl : null,
+                mediaNonce: serializeCiphertext(nonce), voiceNonce: serializeCiphertext(nonce), 
+                voiceDuration: duration, localBlob: fileBlob, timestamp: Date.now(), encrypted: true
+            };
+            await localDB.saveMessage({ ...resultMsg, mediaData: Array.from(new Uint8Array(buffer)) });
+            return resultMsg;
+        } catch (error) { throw error; }
+    }
+
+    async sendVoiceHybrid(chatId, audioBlob, duration) { return this.sendMedia(chatId, audioBlob, 'voice', 'voice.webm', duration); }
+
+    async downloadMedia(msg) {
+        if (msg.localBlob) return msg.localBlob;
+        if (msg.mediaData) return new Blob([new Uint8Array(msg.mediaData)], { type: msg.mimeType || 'application/octet-stream' });
+        const url = msg.mediaUrl || msg.voiceUrl;
+        const nonceStr = msg.mediaNonce || msg.voiceNonce;
+        if (!url || !nonceStr) throw new Error('Нет данных');
         const key = await this.getSessionKey(msg.chatId);
-        const res = await fetch(msg.voiceUrl);
+        const res = await fetch(url);
         const cipherBuffer = await res.arrayBuffer();
-        const plaintext = await decryptMessage(new Uint8Array(cipherBuffer), key, deserializeCiphertext(msg.voiceNonce));
+        const plaintext = await decryptMessage(new Uint8Array(cipherBuffer), key, deserializeCiphertext(nonceStr));
         if (!plaintext) throw new Error('Ошибка расшифровки');
-        
-        const blob = new Blob([plaintext], { type: 'audio/webm' });
+        const blob = new Blob([plaintext], { type: msg.mimeType || 'application/octet-stream' });
         msg.localBlob = blob;
         return blob;
     }
 
     async getMessages(chatId, limit = 50) {
-        const { data, error } = await supabase.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: true }).limit(limit);
+        const { data, error } = await supabase.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: false }).limit(limit);
         if (error) throw error;
 
         if (data && data.length > 0) {
+            data.reverse(); 
             const decoder = new TextDecoder();
             const messages = [];
             for (const msg of data) {
@@ -191,15 +161,22 @@ export class MessagesService {
                 }
                 messages.push({
                     id: msg.id, chatId: msg.chat_id, sender: msg.sender,
-                    text: decrypted?.text || null, voiceUrl: decrypted?.url || null,
-                    voiceNonce: decrypted?.nonce || null, voiceDuration: decrypted?.duration || 0,
-                    timestamp: Date.parse(msg.created_at), encrypted: !!msg.ciphertext
+                    text: decrypted?.text || null, replyTo: decrypted?.replyTo || null,
+                    mediaType: decrypted?.type || null, mediaUrl: decrypted?.url || null,
+                    mediaNonce: decrypted?.nonce || null, mimeType: decrypted?.mimeType || null,
+                    voiceUrl: decrypted?.type === 'voice' ? decrypted?.url : null,
+                    voiceNonce: decrypted?.type === 'voice' ? decrypted?.nonce : null,
+                    voiceDuration: decrypted?.duration || 0, fileName: decrypted?.fileName || null,
+                    timestamp: msg.created_at ? new Date(msg.created_at).getTime() : Date.now(), encrypted: !!msg.ciphertext
                 });
             }
             const localMsgs = await localDB.getChatMessages(chatId, limit);
             for (const lv of localMsgs) {
                 const exists = messages.find(m => m.id === lv.id);
-                if (exists) { exists.voiceData = lv.voiceData; } else { messages.push(lv); }
+                if (exists) { 
+                    exists.mediaData = lv.mediaData; 
+                    exists.mimeType = lv.mimeType; 
+                } else { messages.push(lv); }
             }
             messages.sort((a, b) => a.timestamp - b.timestamp);
             await localDB.saveMessages(messages);
@@ -209,25 +186,38 @@ export class MessagesService {
     }
 
     subscribe(chatId, callback) {
-        const channel = supabase.channel(`messages-${chatId}`).on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${chatId}` }, async (payload) => {
-            const msg = payload.new;
-            const key = await this.getSessionKey(chatId);
-            let decrypted = null;
-            if (key && msg.ciphertext) {
-                try {
-                    const plaintext = await decryptMessage(deserializeCiphertext(msg.ciphertext), key, deserializeCiphertext(msg.nonce));
-                    if (plaintext) decrypted = JSON.parse(new TextDecoder().decode(plaintext));
-                } catch (e) {}
-            }
-            const message = {
-                id: msg.id, chatId: msg.chat_id, sender: msg.sender,
-                text: decrypted?.text || null, voiceUrl: decrypted?.url || null,
-                voiceNonce: decrypted?.nonce || null, voiceDuration: decrypted?.duration || 0,
-                timestamp: Date.parse(msg.created_at), encrypted: !!msg.ciphertext
-            };
-            await localDB.saveMessage(message);
-            if (callback) callback(message);
-        }).subscribe();
+        const channel = supabase.channel(`messages-${chatId}`)
+            .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `chat_id=eq.${chatId}` }, async (payload) => {
+                const msg = payload.new;
+                if (msg.kyber_ciphertext && !this.sessionKeys[chatId]) {
+                    try { await this.setupSessionKeyAsReceiver(chatId, deserializeCiphertext(msg.kyber_ciphertext)); } catch (e) {}
+                }
+                const key = await this.getSessionKey(chatId);
+                let decrypted = null;
+                if (key && msg.ciphertext) {
+                    try {
+                        const plaintext = await decryptMessage(deserializeCiphertext(msg.ciphertext), key, deserializeCiphertext(msg.nonce));
+                        if (plaintext) decrypted = JSON.parse(new TextDecoder().decode(plaintext));
+                    } catch (e) {}
+                }
+                const message = {
+                    id: msg.id, chatId: msg.chat_id, sender: msg.sender,
+                    text: decrypted?.text || null, replyTo: decrypted?.replyTo || null,
+                    mediaType: decrypted?.type || null, mediaUrl: decrypted?.url || null,
+                    mediaNonce: decrypted?.nonce || null, mimeType: decrypted?.mimeType || null,
+                    voiceUrl: decrypted?.type === 'voice' ? decrypted?.url : null,
+                    voiceNonce: decrypted?.type === 'voice' ? decrypted?.nonce : null,
+                    voiceDuration: decrypted?.duration || 0, fileName: decrypted?.fileName || null,
+                    timestamp: msg.created_at ? new Date(msg.created_at).getTime() : Date.now(), encrypted: !!msg.ciphertext
+                };
+                await localDB.saveMessage(message);
+                if (callback) callback(message);
+            })
+            .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages', filter: `chat_id=eq.${chatId}` }, async (payload) => {
+                // Обработка удаления (п.8)
+                await localDB.deleteMessage?.(payload.old.id);
+                if (callback) callback({ type: 'DELETE', id: payload.old.id });
+            }).subscribe();
         this.subscriptions.push(channel);
         return channel;
     }
@@ -240,12 +230,18 @@ export class MessagesService {
     }
 
     async forwardMessage(message, targetChatId) {
-        return this.send(targetChatId, message.text);
+        if (message.mediaType) {
+            let blob = message.localBlob;
+            if (!blob) {
+                try { blob = await this.downloadMedia(message); } catch (e) { throw new Error('Не удалось скачать медиа для пересылки'); }
+            }
+            if (!blob) throw new Error('Нет данных для пересылки');
+            return this.sendMedia(targetChatId, blob, message.mediaType, message.fileName || 'forwarded', message.voiceDuration || 0);
+        }
+        return this.send(targetChatId, message.text, message.replyTo);
     }
 
-    async sendTyping(chatId, isTyping) {
-        signaling.sendTyping(chatId, isTyping);
-    }
+    async sendTyping(chatId, isTyping) { signaling.sendTyping(chatId, isTyping); }
 }
 
 export const messagesService = new MessagesService();

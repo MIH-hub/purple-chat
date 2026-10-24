@@ -1,6 +1,4 @@
 // core/db/local.js
-// Локальная БД с шифрованием at-rest (ChaCha20-Poly1305)
-
 import Dexie from 'dexie';
 import { encryptMessage, decryptMessage, serializeCiphertext, deserializeCiphertext, initChaCha20 } from '../crypto/chacha20.js';
 
@@ -47,8 +45,13 @@ async function decryptPayload(wrapper) {
 
 export const localDB = {
     async saveUser(user) {
-        const safeUser = { ...user };
-        const wrapper = await encryptPayload(safeUser);
+        const existing = await this.getUser(user.username);
+        // Сохраняем ключи, если они были (п.20)
+        const mergedUser = { ...existing, ...user };
+        if (existing?.privateKeyKyber && !user.privateKeyKyber) mergedUser.privateKeyKyber = existing.privateKeyKyber;
+        if (existing?.privateKeyEd25519 && !user.privateKeyEd25519) mergedUser.privateKeyEd25519 = existing.privateKeyEd25519;
+
+        const wrapper = await encryptPayload(mergedUser);
         await db.users.put({ username: user.username, online: user.online, last_seen: user.last_seen, payload: wrapper });
     },
     async getUser(username) {
@@ -98,8 +101,7 @@ export const localDB = {
         const recs = await db.messages.where('chatId').equals(chatId).toArray();
         recs.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
         const sliced = recs.slice(-limit);
-        const msgs = (await Promise.all(sliced.map(r => r.payload ? decryptPayload(r.payload) : r))).filter(Boolean);
-        return msgs;
+        return (await Promise.all(sliced.map(r => r.payload ? decryptPayload(r.payload) : r))).filter(Boolean);
     },
     async deleteMessage(id) {
         await db.messages.delete(id);
