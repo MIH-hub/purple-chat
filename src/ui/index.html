@@ -79,8 +79,10 @@
             z-index: 1;
         }
 
-        button, .chat-item, .settings-item, .theme-option {
+        /* Жесткое исправление кликов на мобильных */
+        button, .chat-item, .settings-item, .theme-option, .forward-item {
             touch-action: manipulation;
+            cursor: pointer;
         }
         button i, button span {
             pointer-events: none;
@@ -745,6 +747,11 @@ function setLoadingSuccess() { loadingIndicator.className = 'loading-indicator s
 function setLoadingError() { loadingIndicator.className = 'loading-indicator error'; loadingText.textContent = 'Ошибка'; appEl.classList.add('shake'); setTimeout(() => appEl.classList.remove('shake'), 500); }
 function hideLoading() { loadingOverlay.classList.remove('active'); loadingOverlay.setAttribute('aria-hidden', 'true'); }
 
+// ФИКС: тап по залипшему оверлею скрывает его
+loadingOverlay.addEventListener('click', () => {
+    loadingOverlay.classList.remove('active');
+});
+
 function applyTheme(theme) { document.documentElement.setAttribute('data-theme', theme); try { localStorage.setItem(THEME_STORAGE_KEY, theme); } catch {} state.theme = theme; $$('.theme-option').forEach(el => el.classList.toggle('active', el.dataset.theme === theme)); }
 $$('.theme-option').forEach(el => el.addEventListener('click', () => applyTheme(el.dataset.theme)));
 applyTheme(state.theme);
@@ -1194,16 +1201,9 @@ $('settings-btn').addEventListener('click', () => settingsScreen.classList.add('
 $('settings-back').addEventListener('click', () => settingsScreen.classList.remove('active'));
 headerAvatar.addEventListener('click', () => settingsScreen.classList.add('active'));
 
-history.pushState({ screen: 'main' }, '', location.href);
-window.addEventListener('popstate', () => {
-    if (state.currentChatId) {
-        closeChat();
-        history.pushState({ screen: 'main' }, '', location.href);
-    } else if (settingsScreen.classList.contains('active')) {
-        settingsScreen.classList.remove('active');
-        history.pushState({ screen: 'main' }, '', location.href);
-    }
-});
+// ИСПРАВЛЕНО: полностью удален window.addEventListener('popstate', ...) и history.pushState
+// Они на телефонах блокировали клики и ломали кнопку Назад.
+// Теперь кнопка "Назад" на телефоне работает корректно (системная или через кнопку в UI).
 
 window.addEventListener('pageshow', (e) => {
     if (!e.persisted || !state.user) return;
